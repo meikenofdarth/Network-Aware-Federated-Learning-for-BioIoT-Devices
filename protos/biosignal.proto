@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package biosignal;
+
+// The message representing a patient's signal update
+message SignalRequest {
+    string hospital_id = 1;
+    double value = 2;
+    bool is_burst = 3;
+    double timestamp = 4;
+}
+
+// The response from the HPC Aggregator
+message SignalResponse {
+    string status = 1;
+    bool trigger_training = 2;
+}
+
+// The service definition
+service BioNetService {
+    rpc SendSignal (SignalRequest) returns (SignalResponse);
+}

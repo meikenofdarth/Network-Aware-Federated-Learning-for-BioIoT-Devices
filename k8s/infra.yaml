@@ -1,0 +1,187 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aggregator
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hospital-a
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hospital-b
+---
+# Shared Storage for Federated Weights
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-buffer-pvc
+  namespace: aggregator
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Gi
+---
+# Tier 4: MLflow Tracking Server (Point 4)
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlflow-service
+  namespace: aggregator
+spec:
+  ports:
+    - port: 5000
+      targetPort: 5000
+  selector:
+    app: mlflow
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlflow-server
+  namespace: aggregator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mlflow
+  template:
+    metadata:
+      labels:
+        app: mlflow
+    spec:
+      containers:
+      - name: mlflow
+        image: ghcr.io/mlflow/mlflow:latest
+        command: ["mlflow", "server", "--host", "0.0.0.0"]
+        ports:
+        - containerPort: 5000
+---
+# Network Policies (Multi-Tenancy)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: hospital-a-egress
+  namespace: hospital-a
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+  - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: aggregator}}}]
+  - ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: hospital-b-egress
+  namespace: hospital-b
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+  - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: aggregator}}}]
+  - ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+---
+# Allow Aggregator to talk to Azure and MLflow
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: aggregator-egress-policy
+  namespace: aggregator
+spec:
+  podSelector: { matchLabels: { app: hpc-aggregator } }
+  policyTypes: ["Egress"]
+  egress:
+  - {} 
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aggregator-service
+  namespace: aggregator
+spec:
+  selector:
+    app: hpc-aggregator
+  ports:
+    - protocol: TCP
+      port: 50051
+      targetPort: 50051
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hpc-aggregator
+  namespace: aggregator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hpc-aggregator
+  template:
+    metadata:
+      labels:
+        app: hpc-aggregator
+    spec:
+      containers:
+      - name: aggregator
+        image: hpc-aggregator:v1
+        ports:
+        - containerPort: 50051
+        env:
+        - name: ADT_URL
+          value: "https://BioSyncTwin.api.sea.digitaltwins.azure.net"
+        - name: MLFLOW_TRACKING_URI
+          value: "http://mlflow-service.aggregator.svc.cluster.local:5000"
+        - name: AZURE_CLIENT_ID
+          valueFrom: { secretKeyRef: { name: azure-creds, key: AZURE_CLIENT_ID } }
+        - name: AZURE_CLIENT_SECRET
+          valueFrom: { secretKeyRef: { name: azure-creds, key: AZURE_CLIENT_SECRET } }
+        - name: AZURE_TENANT_ID
+          valueFrom: { secretKeyRef: { name: azure-creds, key: AZURE_TENANT_ID } }
+        volumeMounts:
+        - name: weight-storage
+          mountPath: /app/weights
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "300m"
+            memory: "256Mi"
+      volumes:
+      - name: weight-storage
+        persistentVolumeClaim:
+          claimName: model-buffer-pvc
+
+---
+# Tier 3: Global Federated Aggregator
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: global-aggregator
+  namespace: aggregator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: global-aggregator
+  template:
+    metadata:
+      labels:
+        app: global-aggregator
+    spec:
+      containers:
+      - name: fed-avg-engine
+        image: hpc-aggregator:v1
+        command: ["python", "fed_avg.py"]
+        volumeMounts:
+        - name: weight-storage
+          mountPath: /app/weights
+      volumes:
+      - name: weight-storage
+        persistentVolumeClaim:
+          claimName: model-buffer-pvc

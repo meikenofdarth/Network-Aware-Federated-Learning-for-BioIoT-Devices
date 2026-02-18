@@ -1,0 +1,23 @@
+{
+  "@id": "dtmi:com:biosync:Patient;1",
+  "@type": "Interface",
+  "displayName": "Bio-Signal Patient",
+  "contents": [
+    {
+      "@type": "Property",
+      "name": "HeartRate",
+      "schema": "double"
+    },
+    {
+      "@type": "Property",
+      "name": "IsCritical",
+      "schema": "boolean"
+    },
+    {
+      "@type": "Telemetry",
+      "name": "SeizureEvent",
+      "schema": "string"
+    }
+  ],
+  "@context": "dtmi:dtdl:context;2"
+}

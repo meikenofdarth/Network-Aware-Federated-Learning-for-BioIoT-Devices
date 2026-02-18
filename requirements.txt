@@ -1,0 +1,19 @@
+# Core Networking & Async
+grpcio
+grpcio-tools
+protobuf
+
+# Data Science & AI
+numpy
+torch
+onnx
+onnxruntime
+
+# Cloud & IoT
+azure-identity
+azure-digitaltwins-core
+paho-mqtt
+
+# Infrastructure Automation
+kubernetes
+ansible
