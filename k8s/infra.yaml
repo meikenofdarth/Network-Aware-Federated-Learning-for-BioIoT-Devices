@@ -63,7 +63,9 @@ spec:
     spec:
       containers:
       - name: mlflow
-        image: ghcr.io/mlflow/mlflow:latest
+        # CNE FIX: Reusing your custom image which has 'pip install mlflow'
+        # This guarantees compatibility with your AKS nodes.
+        image: biosyncregistry1772554412.azurecr.io/hpc-aggregator:v7
         command:
           - "mlflow"
           - "server"
@@ -160,8 +162,8 @@ spec:
     spec:
       containers:
       - name: aggregator
-        # CNE FIX: Bumped to :v4
-        image: biosyncregistry1772554412.azurecr.io/hpc-aggregator:v5
+        # CNE FIX: Bumped to :v6
+        image: biosyncregistry1772554412.azurecr.io/hpc-aggregator:v7
         ports:
           - containerPort: 50051
         env:
@@ -218,8 +220,8 @@ spec:
     spec:
       containers:
       - name: fed-avg-engine
-        # CNE FIX: Bumped to :v4
-        image: biosyncregistry1772554412.azurecr.io/hpc-aggregator:v5
+        # CNE FIX: Bumped to :v6
+        image: biosyncregistry1772554412.azurecr.io/hpc-aggregator:v7
         command:
           - "python"
           - "fed_avg.py"

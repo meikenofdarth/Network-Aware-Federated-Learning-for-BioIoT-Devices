@@ -9,31 +9,31 @@ from azure.digitaltwins.core import DigitalTwinsClient
 
 # CNE/HPC Config
 ADT_URL = os.getenv("ADT_URL")
-MLFLOW_URI = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow-service.aggregator.svc.cluster.local:5000")
 
 class BioNetAggregator(biosignal_pb2_grpc.BioNetServiceServicer):
     def __init__(self):
-            # CNE Fix: Direct relative path
-            model_path = "bio_logic.onnx"
-            
-            try:
-                self.session = ort.InferenceSession(model_path)
-                print(f"✅ HPC Inference Engine: Loaded model '{model_path}'")
-            except Exception as e:
-                print(f"❌ CRITICAL: Failed to load ONNX model: {e}")
-                raise e # Force pod to restart if model is missing
+        # CNE Fix: Direct relative path inside container
+        model_path = "bio_logic.onnx"
+        try:
+            self.session = ort.InferenceSession(model_path)
+            print(f"✅ HPC Inference Engine: Loaded model '{model_path}'")
+        except Exception as e:
+            print(f"❌ CRITICAL: Failed to load ONNX model: {e}")
+            raise e
 
-            # Azure Bridge (Restored!)
-            self.adt_client = None
-            if ADT_URL:
-                try:
-                    self.adt_client = DigitalTwinsClient(ADT_URL, DefaultAzureCredential())
-                    print(f"✅ Azure Mirror Active")
-                except Exception as e: 
-                    print(f"⚠️ Azure Init Warning: {e}")
+        # Azure Bridge (Restored for Phase 5)
+        self.adt_client = None
+        if ADT_URL:
+            try:
+                # DefaultAzureCredential handles the Service Principal from K8s Secret
+                cred = DefaultAzureCredential()
+                self.adt_client = DigitalTwinsClient(ADT_URL, cred)
+                print(f"✅ Connected to Azure Digital Twin: {ADT_URL}")
+            except Exception as e: 
+                print(f"⚠️ Azure Initialization Failed: {e}")
 
     def SendSignal(self, request, context):
-        # ECE Fix: 1D-CNN expects 3D input [Batch, Channel, Length]
+        # ECE: 1D-CNN expects 3D input [Batch, Channel, Length]
         input_data = np.array([[[request.value]]], dtype=np.float32)
         
         outputs = self.session.run(None, {'input': input_data})
@@ -54,12 +54,9 @@ class BioNetAggregator(biosignal_pb2_grpc.BioNetServiceServicer):
 
     def save_local_weights(self, hospital_id, prob):
         # POINT 5: DIFFERENTIAL PRIVACY (Laplacian Noise)
-        epsilon = 0.5 
-        sensitivity = 0.1
+        epsilon, sensitivity = 0.5, 0.1
         noise = np.random.laplace(0, sensitivity/epsilon, 5)
-        
-        raw_weights = np.random.rand(5) 
-        private_weights = (raw_weights + noise).tolist()
+        private_weights = (np.random.rand(5) + noise).tolist()
 
         weight_data = {
             "hospital": hospital_id,
@@ -71,8 +68,13 @@ class BioNetAggregator(biosignal_pb2_grpc.BioNetServiceServicer):
         try:
             with open(filename, 'w') as f:
                 json.dump(weight_data, f)
+                # HPC FIX: Flush and Fsync force the network drive to commit the data
+                # This prevents the "JSON Expecting Value" error in fed_avg.py
+                f.flush()
+                os.fsync(f.fileno())
             print(f"📦 Privacy-Preserved updates stored for {hospital_id}")
-        except Exception as e: print(f"❌ Weight Error: {e}")
+        except Exception as e: 
+            print(f"❌ Weight Save Error: {e}")
 
     def sync_to_azure(self, twin_id, val, critical):
         # CNE Fix: Using 'add' to ensure idempotent cloud property updates
@@ -82,8 +84,9 @@ class BioNetAggregator(biosignal_pb2_grpc.BioNetServiceServicer):
         ]
         try:
             self.adt_client.update_digital_twin(twin_id, patch)
-            print(f"☁️  Azure Mirror Updated for {twin_id}")
-        except Exception as e: print(f"❌ Azure Sync Error: {e}")
+            print(f"☁️ Azure Mirror Updated for {twin_id}")
+        except Exception as e: 
+            print(f"❌ Azure Sync Error: {e}")
 
 def serve():
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))

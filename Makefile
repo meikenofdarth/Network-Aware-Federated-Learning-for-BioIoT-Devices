@@ -3,7 +3,7 @@
 PYTHON := ./venv/bin/python3
 REGISTRY := biosyncregistry1772554412.azurecr.io
 # --- VERSION 5 (Demo Mode) ---
-VERSION := v5
+VERSION := v7
 
 login:
 	az acr login --name biosyncregistry1772554412
