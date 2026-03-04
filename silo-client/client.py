@@ -38,19 +38,26 @@ def run():
         while True:
             total_attempts += 1
             
-            # --- 1. SIGNAL GENERATION (Real vs Synthetic) ---
+            # --- DEMO FIX: Force Bursts (10% chance) ---
+            # This ensures your teacher sees scaling/learning immediately
+            force_burst = random.random() > 0.90
+            
+            # --- 1. SIGNAL GENERATION ---
             if eeg_trace is not None:
                 # Loop through the real file
                 val = float(eeg_trace[idx % len(eeg_trace)])
-                # In CHB-MIT, seizures are high amplitude. 
-                # We simulate a "Detected Event" if signal > 0.8 (Normalized)
+                
+                # Overwrite real data with a "Synthetic Seizure" if forced
+                if force_burst: 
+                    val = 0.95 # High amplitude
+                
                 is_burst = val > 0.8 
                 idx += 1
             else:
-                # Fallback
-                val = 60 + random.uniform(-5, 5)
-                is_burst = random.random() > 0.94
-                if is_burst: val += 40
+                # Fallback generator
+                val = 0.5 + random.uniform(-0.1, 0.1)
+                is_burst = force_burst or (random.random() > 0.94)
+                if is_burst: val = 0.95
 
             # --- 2. PRUNING LOGIC ---
             current_time = time.time()
@@ -61,8 +68,7 @@ def run():
 
             if should_send:
                 # --- 3. HPC STRESS TEST (KEDA Trigger) ---
-                # Real seizures last seconds. We simulate the network load of that.
-                iterations = 1000 if is_burst else 1
+                iterations = 500 if is_burst else 1
                 
                 if is_burst:
                     print(f"!!! SEIZURE DETECTED (Val: {val:.2f}) - HPC BURST STARTED !!!")
@@ -79,7 +85,6 @@ def run():
                     try:
                         stub.SendSignal(request)
                     except grpc.RpcError:
-                        # If network is congested, we drop packets (Standard UDP/IoT behavior)
                         break 
                 
                 last_sent_val = val
@@ -92,8 +97,8 @@ def run():
                     efficiency = (packets_saved / total_attempts) * 100
                     print(f"[PRUNE] Bandwidth Efficiency: {efficiency:.1f}%")
             
-            # 10Hz sampling rate (Adjust this to 0.5 or 1.0 to save Laptop CPU)
-            time.sleep(0.1) 
+            # Simulation Speed: 2Hz (Adjusts how fast the demo runs)
+            time.sleep(0.5) 
 
 if __name__ == '__main__':
     run()

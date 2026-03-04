@@ -1,19 +1,23 @@
+# --- Tier 1: Static Storage Infrastructure (The CNE Secure Way) ---
 apiVersion: v1
-kind: Namespace
+kind: PersistentVolume
 metadata:
-  name: aggregator
+  name: model-buffer-pv
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  csi:
+    driver: file.csi.azure.com
+    # volumeHandle must be unique; using a timestamp-based ID
+    volumeHandle: biosync-hpc-storage-3501 
+    volumeAttributes:
+      secretName: azure-storage-secret
+      secretNamespace: aggregator
+      shareName: model-buffer
 ---
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: hospital-a
----
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: hospital-b
----
-# Shared Storage for Federated Weights
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -25,8 +29,11 @@ spec:
   resources:
     requests:
       storage: 1Gi
+  volumeName: model-buffer-pv # Explicitly bind to the PV above
+  storageClassName: "" # Disables dynamic provisioning
 ---
-# Tier 4: MLflow Tracking Server (Point 4)
+
+# --- Tier 2: MLflow Tracking Server ---
 apiVersion: v1
 kind: Service
 metadata:
@@ -57,11 +64,16 @@ spec:
       containers:
       - name: mlflow
         image: ghcr.io/mlflow/mlflow:latest
-        command: ["mlflow", "server", "--host", "0.0.0.0"]
+        command:
+          - "mlflow"
+          - "server"
+          - "--host"
+          - "0.0.0.0"
         ports:
-        - containerPort: 5000
+          - containerPort: 5000
 ---
-# Network Policies (Multi-Tenancy)
+
+# --- Tier 3: Network Policies (Isolation & Egress) ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -69,10 +81,18 @@ metadata:
   namespace: hospital-a
 spec:
   podSelector: {}
-  policyTypes: ["Egress"]
+  policyTypes:
+    - Egress
   egress:
-  - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: aggregator}}}]
-  - ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: aggregator
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -81,23 +101,35 @@ metadata:
   namespace: hospital-b
 spec:
   podSelector: {}
-  policyTypes: ["Egress"]
+  policyTypes:
+    - Egress
   egress:
-  - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: aggregator}}}]
-  - ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: aggregator
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
 ---
-# Allow Aggregator to talk to Azure and MLflow
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: aggregator-egress-policy
   namespace: aggregator
 spec:
-  podSelector: { matchLabels: { app: hpc-aggregator } }
-  policyTypes: ["Egress"]
+  podSelector:
+    matchLabels:
+      app: hpc-aggregator
+  policyTypes:
+    - Egress
   egress:
-  - {} 
+    - {} # Allow egress for Azure SDK & MLflow
 ---
+
+# --- Tier 4: gRPC Aggregator Service & Deployment ---
 apiVersion: v1
 kind: Service
 metadata:
@@ -128,23 +160,33 @@ spec:
     spec:
       containers:
       - name: aggregator
-        image: hpc-aggregator:v1
+        # CNE FIX: Bumped to :v4
+        image: biosyncregistry1772554412.azurecr.io/hpc-aggregator:v5
         ports:
-        - containerPort: 50051
+          - containerPort: 50051
         env:
-        - name: ADT_URL
-          value: "https://BioSyncTwin.api.sea.digitaltwins.azure.net"
-        - name: MLFLOW_TRACKING_URI
-          value: "http://mlflow-service.aggregator.svc.cluster.local:5000"
-        - name: AZURE_CLIENT_ID
-          valueFrom: { secretKeyRef: { name: azure-creds, key: AZURE_CLIENT_ID } }
-        - name: AZURE_CLIENT_SECRET
-          valueFrom: { secretKeyRef: { name: azure-creds, key: AZURE_CLIENT_SECRET } }
-        - name: AZURE_TENANT_ID
-          valueFrom: { secretKeyRef: { name: azure-creds, key: AZURE_TENANT_ID } }
+          - name: ADT_URL
+            value: "https://BioSyncTwin.api.sea.digitaltwins.azure.net"
+          - name: MLFLOW_TRACKING_URI
+            value: "http://mlflow-service.aggregator.svc.cluster.local:5000"
+          - name: AZURE_CLIENT_ID
+            valueFrom:
+              secretKeyRef:
+                name: azure-creds
+                key: AZURE_CLIENT_ID
+          - name: AZURE_CLIENT_SECRET
+            valueFrom:
+              secretKeyRef:
+                name: azure-creds
+                key: AZURE_CLIENT_SECRET
+          - name: AZURE_TENANT_ID
+            valueFrom:
+              secretKeyRef:
+                name: azure-creds
+                key: AZURE_TENANT_ID
         volumeMounts:
-        - name: weight-storage
-          mountPath: /app/weights
+          - name: weight-storage
+            mountPath: /app/weights
         resources:
           requests:
             cpu: "100m"
@@ -153,12 +195,12 @@ spec:
             cpu: "300m"
             memory: "256Mi"
       volumes:
-      - name: weight-storage
-        persistentVolumeClaim:
-          claimName: model-buffer-pvc
-
+        - name: weight-storage
+          persistentVolumeClaim:
+            claimName: model-buffer-pvc
 ---
-# Tier 3: Global Federated Aggregator
+
+# --- Tier 5: Global Federated Aggregator ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -176,12 +218,15 @@ spec:
     spec:
       containers:
       - name: fed-avg-engine
-        image: hpc-aggregator:v1
-        command: ["python", "fed_avg.py"]
+        # CNE FIX: Bumped to :v4
+        image: biosyncregistry1772554412.azurecr.io/hpc-aggregator:v5
+        command:
+          - "python"
+          - "fed_avg.py"
         volumeMounts:
-        - name: weight-storage
-          mountPath: /app/weights
+          - name: weight-storage
+            mountPath: /app/weights
       volumes:
-      - name: weight-storage
-        persistentVolumeClaim:
-          claimName: model-buffer-pvc
+        - name: weight-storage
+          persistentVolumeClaim:
+            claimName: model-buffer-pvc

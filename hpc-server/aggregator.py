@@ -13,16 +13,24 @@ MLFLOW_URI = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow-service.aggregator.
 
 class BioNetAggregator(biosignal_pb2_grpc.BioNetServiceServicer):
     def __init__(self):
-        self.session = ort.InferenceSession("bio_logic.onnx")
-        print(f"HPC Engine: 1D-CNN Model Loaded")
-        
-        # Azure Bridge
-        self.adt_client = None
-        if ADT_URL:
+            # CNE Fix: Direct relative path
+            model_path = "bio_logic.onnx"
+            
             try:
-                self.adt_client = DigitalTwinsClient(ADT_URL, DefaultAzureCredential())
-                print(f"✅ Azure Mirror Active")
-            except Exception as e: print(f"⚠️ Azure Init Warning: {e}")
+                self.session = ort.InferenceSession(model_path)
+                print(f"✅ HPC Inference Engine: Loaded model '{model_path}'")
+            except Exception as e:
+                print(f"❌ CRITICAL: Failed to load ONNX model: {e}")
+                raise e # Force pod to restart if model is missing
+
+            # Azure Bridge (Restored!)
+            self.adt_client = None
+            if ADT_URL:
+                try:
+                    self.adt_client = DigitalTwinsClient(ADT_URL, DefaultAzureCredential())
+                    print(f"✅ Azure Mirror Active")
+                except Exception as e: 
+                    print(f"⚠️ Azure Init Warning: {e}")
 
     def SendSignal(self, request, context):
         # ECE Fix: 1D-CNN expects 3D input [Batch, Channel, Length]
@@ -45,12 +53,12 @@ class BioNetAggregator(biosignal_pb2_grpc.BioNetServiceServicer):
         return biosignal_pb2.SignalResponse(status="PROCESSED", trigger_training=is_anomaly)
 
     def save_local_weights(self, hospital_id, prob):
-        # --- POINT 5: DIFFERENTIAL PRIVACY (Laplacian Noise) ---
-        epsilon = 0.5  # Privacy budget
+        # POINT 5: DIFFERENTIAL PRIVACY (Laplacian Noise)
+        epsilon = 0.5 
         sensitivity = 0.1
         noise = np.random.laplace(0, sensitivity/epsilon, 5)
         
-        raw_weights = np.random.rand(5) # Simulating weight extraction
+        raw_weights = np.random.rand(5) 
         private_weights = (raw_weights + noise).tolist()
 
         weight_data = {
@@ -67,13 +75,14 @@ class BioNetAggregator(biosignal_pb2_grpc.BioNetServiceServicer):
         except Exception as e: print(f"❌ Weight Error: {e}")
 
     def sync_to_azure(self, twin_id, val, critical):
+        # CNE Fix: Using 'add' to ensure idempotent cloud property updates
         patch = [
             {"op": "add", "path": "/HeartRate", "value": float(val)},
             {"op": "add", "path": "/IsCritical", "value": bool(critical)}
         ]
         try:
             self.adt_client.update_digital_twin(twin_id, patch)
-            print(f"☁️  Azure Mirror Updated")
+            print(f"☁️  Azure Mirror Updated for {twin_id}")
         except Exception as e: print(f"❌ Azure Sync Error: {e}")
 
 def serve():

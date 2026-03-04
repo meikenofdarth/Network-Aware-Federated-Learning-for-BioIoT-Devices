@@ -3,15 +3,15 @@ WORKDIR /app
 
 # HPC & Azure Requirements
 RUN pip install grpcio grpcio-tools onnxruntime numpy \
-    azure-digitaltwins-core azure-identity
+    azure-digitaltwins-core azure-identity mlflow
 
-# Ensure weights directory exists for PVC mount
+# Ensure weights directory exists
 RUN mkdir -p /app/weights && chmod 777 /app/weights
 
-# Copy all server-side logic
 COPY hpc-server/aggregator.py .
 COPY hpc-server/fed_avg.py . 
-COPY bio_logic.onnx . 
+# CNE Fix: Wildcard ensures both .onnx and .onnx.data are copied
+COPY bio_logic.onnx* . 
 COPY biosignal_pb2.py .
 COPY biosignal_pb2_grpc.py .
 

@@ -1,36 +1,50 @@
-.PHONY: build deploy run-hospitals clean
+.PHONY: login build deploy run-hospitals clean
 
-# CNE Focus: Ensure we use the Python from our virtual environment
 PYTHON := ./venv/bin/python3
+REGISTRY := biosyncregistry1772554412.azurecr.io
+# --- VERSION 5 (Demo Mode) ---
+VERSION := v5
+
+login:
+	az acr login --name biosyncregistry1772554412
 
 build:
-	eval $$(minikube docker-env) && \
-	$(PYTHON) hpc-server/generate_model.py && \
-	docker build -t hpc-aggregator:v1 -f hpc-server/Dockerfile . && \
-	docker build -t silo-client:v1 -f silo-client/Dockerfile .
+	# Generate Model
+	$(PYTHON) hpc-server/generate_model.py
+	
+	# Build & Push Aggregator (No-cache ensures new ONNX model is copied)
+	docker build --no-cache --platform linux/amd64 -t $(REGISTRY)/hpc-aggregator:$(VERSION) -f hpc-server/Dockerfile .
+	docker push $(REGISTRY)/hpc-aggregator:$(VERSION)
+	
+	# Build & Push Client
+	docker build --platform linux/amd64 -t $(REGISTRY)/silo-client:$(VERSION) -f silo-client/Dockerfile .
+	docker push $(REGISTRY)/silo-client:$(VERSION)
 
 deploy:
-	# 1. Create namespaces first
+	# Create Namespaces
 	kubectl create namespace hospital-a --dry-run=client -o yaml | kubectl apply -f -
 	kubectl create namespace hospital-b --dry-run=client -o yaml | kubectl apply -f -
 	kubectl create namespace aggregator --dry-run=client -o yaml | kubectl apply -f -
-	# 2. Apply CNE labels for Network Isolation
+	
+	# Label Namespaces
 	kubectl label ns hospital-a kubernetes.io/metadata.name=hospital-a --overwrite
 	kubectl label ns hospital-b kubernetes.io/metadata.name=hospital-b --overwrite
 	kubectl label ns aggregator kubernetes.io/metadata.name=aggregator --overwrite
-	# 3. Apply the infrastructure
+	
+	# Deploy Infra & KEDA
 	kubectl apply -f k8s/infra.yaml
 	kubectl apply -f k8s/hpc-scaler.yaml
 
 run-hospitals:
-	# Launch Hospital Alpha
+	# Hospital Alpha
 	kubectl delete pod test-client -n hospital-a --ignore-not-found
-	kubectl run test-client -n hospital-a --image=silo-client:v1 \
+	kubectl run test-client -n hospital-a --image=$(REGISTRY)/silo-client:$(VERSION) \
 		--env="AGGREGATOR_ADDR=aggregator-service.aggregator.svc.cluster.local:50051" \
 		--env="HOSPITAL_ID=Silo-Alpha"
-	# Launch Hospital Beta (Multi-tenant proof)
+	
+	# Hospital Beta
 	kubectl delete pod test-client -n hospital-b --ignore-not-found
-	kubectl run test-client -n hospital-b --image=silo-client:v1 \
+	kubectl run test-client -n hospital-b --image=$(REGISTRY)/silo-client:$(VERSION) \
 		--env="AGGREGATOR_ADDR=aggregator-service.aggregator.svc.cluster.local:50051" \
 		--env="HOSPITAL_ID=Silo-Beta"
 
