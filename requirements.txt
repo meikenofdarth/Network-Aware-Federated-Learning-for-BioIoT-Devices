@@ -1,19 +1,38 @@
-# Core Networking & Async
-grpcio
-grpcio-tools
-protobuf
+# ── Core gRPC Networking ──────────────────────────────────────────────
+grpcio==1.62.1
+grpcio-tools==1.62.1
+protobuf==4.25.3
 
-# Data Science & AI
-numpy
-torch
-onnx
-onnxruntime
+# ── Inference & Signal Processing ────────────────────────────────────
+numpy==1.26.4
+onnxruntime==1.17.1
 
-# Cloud & IoT
-azure-identity
-azure-digitaltwins-core
-paho-mqtt
+# ── Model Generation (local dev only — not installed in containers) ──
+torch==2.2.1
+onnx==1.16.0
 
-# Infrastructure Automation
-kubernetes
-ansible
+# ── Formal Differential Privacy ──────────────────────────────────────
+# Opacus instruments PyTorch's backward pass directly.
+# Provides (epsilon, delta)-DP with Rényi accountant.
+# Must match torch version — opacus 0.16+ supports torch 2.x
+opacus==0.16.3
+
+# ── Azure Cloud & IoT ─────────────────────────────────────────────────
+azure-identity==1.16.0
+azure-digitaltwins-core==1.2.0
+
+# ── MLOps & Observability ─────────────────────────────────────────────
+mlflow==2.8.0
+streamlit==1.32.0
+
+# ── Infrastructure ────────────────────────────────────────────────────
+kubernetes==29.0.0
+paho-mqtt==1.6.1
+
+
+fastapi==0.110.0
+uvicorn==0.29.0
+httpx==0.27.0
+azure-identity==1.16.0
+azure-digitaltwins-core==1.2.0
+kubernetes==29.0.0

@@ -65,7 +65,7 @@ spec:
       - name: mlflow
         # CNE FIX: Reusing your custom image which has 'pip install mlflow'
         # This guarantees compatibility with your AKS nodes.
-        image: biosyncregistry1772554412.azurecr.io/hpc-aggregator:v7
+        image: biosyncregistry1772554412.azurecr.io/hpc-aggregator:v11
         command:
           - "mlflow"
           - "server"
@@ -163,7 +163,7 @@ spec:
       containers:
       - name: aggregator
         # CNE FIX: Bumped to :v6
-        image: biosyncregistry1772554412.azurecr.io/hpc-aggregator:v7
+        image: biosyncregistry1772554412.azurecr.io/hpc-aggregator:v11
         ports:
           - containerPort: 50051
         env:
@@ -221,7 +221,7 @@ spec:
       containers:
       - name: fed-avg-engine
         # CNE FIX: Bumped to :v6
-        image: biosyncregistry1772554412.azurecr.io/hpc-aggregator:v7
+        image: biosyncregistry1772554412.azurecr.io/hpc-aggregator:v11
         command:
           - "python"
           - "fed_avg.py"
@@ -232,3 +232,155 @@ spec:
         - name: weight-storage
           persistentVolumeClaim:
             claimName: model-buffer-pvc
+
+# ─────────────────────────────────────────────────────────────────────
+# APPEND THESE BLOCKS TO THE BOTTOM OF k8s/infra.yaml
+# ─────────────────────────────────────────────────────────────────────
+
+# ── RBAC: allow dashboard-api to read deployments in aggregator ns ────
+# The K8s Python client inside server.py calls AppsV1Api to get pod count.
+# Without this, it gets a 403 Forbidden.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dashboard-api-sa
+  namespace: aggregator
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: deployment-reader
+  namespace: aggregator
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs:     ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dashboard-api-rb
+  namespace: aggregator
+subjects:
+  - kind: ServiceAccount
+    name: dashboard-api-sa
+    namespace: aggregator
+roleRef:
+  kind: Role
+  name: deployment-reader
+  apiGroup: rbac.authorization.k8s.io
+
+# ── Dashboard API (FastAPI bridge) ────────────────────────────────────
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dashboard-api-service
+  namespace: aggregator
+spec:
+  selector:
+    app: dashboard-api
+  ports:
+    - protocol: TCP
+      port: 8000
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dashboard-api
+  namespace: aggregator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dashboard-api
+  template:
+    metadata:
+      labels:
+        app: dashboard-api
+    spec:
+      serviceAccountName: dashboard-api-sa
+      containers:
+        - name: dashboard-api
+          image: biosyncregistry1772554412.azurecr.io/dashboard-api:v2
+          ports:
+            - containerPort: 8000
+          env:
+            - name: ADT_URL
+              value: "https://BioSyncTwin.api.sea.digitaltwins.azure.net"
+            - name: MLFLOW_TRACKING_URI
+              value: "http://mlflow-service.aggregator.svc.cluster.local:5000"
+            - name: AGGREGATOR_NAMESPACE
+              value: "aggregator"
+            - name: AGGREGATOR_DEPLOYMENT
+              value: "hpc-aggregator"
+            - name: AZURE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: azure-creds
+                  key: AZURE_CLIENT_ID
+            - name: AZURE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: azure-creds
+                  key: AZURE_CLIENT_SECRET
+            - name: AZURE_TENANT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: azure-creds
+                  key: AZURE_TENANT_ID
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+
+# ── Dashboard frontend (React + nginx) ────────────────────────────────
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dashboard-service
+  namespace: aggregator
+spec:
+  selector:
+    app: dashboard
+  # LoadBalancer gives you an external IP — this is what you open
+  # in a browser during your professor demo or internship interview.
+  type: LoadBalancer
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dashboard
+  namespace: aggregator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dashboard
+  template:
+    metadata:
+      labels:
+        app: dashboard
+    spec:
+      containers:
+        - name: dashboard
+          image: biosyncregistry1772554412.azurecr.io/biosync-dashboard:v1
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "100m"
+              memory: "128Mi"

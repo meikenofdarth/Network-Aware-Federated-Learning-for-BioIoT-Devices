@@ -1,0 +1,138 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dashboard-api-sa
+  namespace: aggregator
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: deployment-reader
+  namespace: aggregator
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs:     ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dashboard-api-rb
+  namespace: aggregator
+subjects:
+  - kind: ServiceAccount
+    name: dashboard-api-sa
+    namespace: aggregator
+roleRef:
+  kind: Role
+  name: deployment-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dashboard-api-service
+  namespace: aggregator
+spec:
+  selector:
+    app: dashboard-api
+  ports:
+    - protocol: TCP
+      port: 8000
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dashboard-api
+  namespace: aggregator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dashboard-api
+  template:
+    metadata:
+      labels:
+        app: dashboard-api
+    spec:
+      serviceAccountName: dashboard-api-sa
+      containers:
+        - name: dashboard-api
+          image: biosyncregistry1772554412.azurecr.io/dashboard-api:v2
+          ports:
+            - containerPort: 8000
+          env:
+            - name: ADT_URL
+              value: "https://BioSyncTwin.api.sea.digitaltwins.azure.net"
+            - name: MLFLOW_TRACKING_URI
+              value: "http://mlflow-service.aggregator.svc.cluster.local:5000"
+            - name: AGGREGATOR_NAMESPACE
+              value: "aggregator"
+            - name: AGGREGATOR_DEPLOYMENT
+              value: "hpc-aggregator"
+            - name: AZURE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: azure-creds
+                  key: AZURE_CLIENT_ID
+            - name: AZURE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: azure-creds
+                  key: AZURE_CLIENT_SECRET
+            - name: AZURE_TENANT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: azure-creds
+                  key: AZURE_TENANT_ID
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dashboard-service
+  namespace: aggregator
+spec:
+  selector:
+    app: dashboard
+  type: LoadBalancer
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dashboard
+  namespace: aggregator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dashboard
+  template:
+    metadata:
+      labels:
+        app: dashboard
+    spec:
+      containers:
+        - name: dashboard
+          image: biosyncregistry1772554412.azurecr.io/biosync-dashboard:v1
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "100m"
+              memory: "128Mi"

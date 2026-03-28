@@ -2,7 +2,6 @@ syntax = "proto3";
 
 package biosignal;
 
-// The message representing a patient's signal update
 message SignalRequest {
     string hospital_id = 1;
     double value = 2;
@@ -10,13 +9,15 @@ message SignalRequest {
     double timestamp = 4;
 }
 
-// The response from the HPC Aggregator
 message SignalResponse {
     string status = 1;
     bool trigger_training = 2;
 }
 
-// The service definition
 service BioNetService {
-    rpc SendSignal (SignalRequest) returns (SignalResponse);
+    // UPGRADE: Unary → Bidirectional Streaming
+    // One persistent HTTP/2 stream replaces thousands of TCP handshakes
+    // during a seizure burst. The server can now push back control signals
+    // (e.g. trigger_training=True) without the client polling.
+    rpc StreamSignal (stream SignalRequest) returns (stream SignalResponse);
 }

@@ -2,7 +2,7 @@
 """Client and server classes corresponding to protobuf-defined services."""
 import grpc
 
-import biosignal_pb2 as biosignal__pb2
+from protos import biosignal_pb2 as protos_dot_biosignal__pb2
 
 
 class BioNetServiceStub(object):
@@ -16,8 +16,8 @@ class BioNetServiceStub(object):
         """
         self.StreamSignal = channel.stream_stream(
                 '/biosignal.BioNetService/StreamSignal',
-                request_serializer=biosignal__pb2.SignalRequest.SerializeToString,
-                response_deserializer=biosignal__pb2.SignalResponse.FromString,
+                request_serializer=protos_dot_biosignal__pb2.SignalRequest.SerializeToString,
+                response_deserializer=protos_dot_biosignal__pb2.SignalResponse.FromString,
                 )
 
 
@@ -39,8 +39,8 @@ def add_BioNetServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'StreamSignal': grpc.stream_stream_rpc_method_handler(
                     servicer.StreamSignal,
-                    request_deserializer=biosignal__pb2.SignalRequest.FromString,
-                    response_serializer=biosignal__pb2.SignalResponse.SerializeToString,
+                    request_deserializer=protos_dot_biosignal__pb2.SignalRequest.FromString,
+                    response_serializer=protos_dot_biosignal__pb2.SignalResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -64,7 +64,7 @@ class BioNetService(object):
             timeout=None,
             metadata=None):
         return grpc.experimental.stream_stream(request_iterator, target, '/biosignal.BioNetService/StreamSignal',
-            biosignal__pb2.SignalRequest.SerializeToString,
-            biosignal__pb2.SignalResponse.FromString,
+            protos_dot_biosignal__pb2.SignalRequest.SerializeToString,
+            protos_dot_biosignal__pb2.SignalResponse.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
