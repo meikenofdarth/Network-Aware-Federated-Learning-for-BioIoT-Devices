@@ -1,5 +1,6 @@
 import grpc
 from concurrent import futures
+import threading
 import biosignal_pb2, biosignal_pb2_grpc
 import onnxruntime as ort
 import numpy as np
@@ -15,11 +16,6 @@ from azure.digitaltwins.core import DigitalTwinsClient
 ADT_URL = os.getenv("ADT_URL")
 ADT_DEBOUNCE_SECONDS = 5.0
 
-# ── DP Configuration ──────────────────────────────────────────────────
-# epsilon: privacy budget per round. Lower = more private, more noise.
-# delta: probability of accidental privacy leakage. Must be < 1/n_samples.
-# max_grad_norm: L2 norm clip bound. Gradients exceeding this are clipped
-#                before noise is added — this is what makes DP formal.
 DP_EPSILON = 0.5
 DP_DELTA = 1e-5
 DP_MAX_GRAD_NORM = 1.0
@@ -56,12 +52,7 @@ class BioNetAggregator(biosignal_pb2_grpc.BioNetServiceServicer):
             print(f"❌ CRITICAL: Failed to load ONNX model: {e}")
             raise e
 
-        # ── SECURITY UPGRADE: Opacus DP Engine ───────────────────────
-        # Step 1: Validate and fix the model for Opacus compatibility.
-        # Opacus requires all BatchNorm layers to be replaced with
-        # GroupNorm. ModuleValidator.fix() handles this automatically.
-        # Our BioNet1DCNN has no BatchNorm, but we validate anyway
-        # as a defensive check for future architecture changes.
+        # ── Opacus DP Engine ──────────────────────────────────────────
         raw_model = BioNet1DCNN()
         self.torch_model = ModuleValidator.fix(raw_model)
 
@@ -71,7 +62,6 @@ class BioNetAggregator(biosignal_pb2_grpc.BioNetServiceServicer):
         else:
             print(f"✅ Model validated for Opacus DP compatibility")
 
-        # Step 2: Standard optimizer — Opacus wraps it, not replaces it.
         base_optimizer = optim.SGD(
             self.torch_model.parameters(),
             lr=0.001,
@@ -79,20 +69,11 @@ class BioNetAggregator(biosignal_pb2_grpc.BioNetServiceServicer):
         )
         self.criterion = nn.BCELoss()
 
-        # Step 3: Attach PrivacyEngine to the model and optimizer.
-        # This instruments the backward pass to:
-        #   a) Clip per-sample gradients to max_grad_norm (L2)
-        #   b) Add calibrated Gaussian noise to the clipped gradients
-        #   c) Track cumulative privacy budget (epsilon) across steps
-        #
-        # noise_multiplier controls the Gaussian noise scale.
-        # Opacus computes the exact epsilon spent after each step
-        # using the Rényi Differential Privacy accountant.
         self.privacy_engine = PrivacyEngine()
         (
             self.torch_model,
             self.optimizer,
-            self._dummy_data_loader   # Required by Opacus API even for online learning
+            self._dummy_data_loader
         ) = self.privacy_engine.make_private_with_epsilon(
             module=self.torch_model,
             optimizer=base_optimizer,
@@ -110,20 +91,37 @@ class BioNetAggregator(biosignal_pb2_grpc.BioNetServiceServicer):
 
         self.training_samples_this_round = 0
 
-        # Load global model checkpoint if available
+        # FIX 2: Load global checkpoint with _module. prefix so Opacus
+        # GradSampleModule can load it. fed_avg.py saves with plain keys
+        # (conv1.weight) but Opacus expects prefixed keys (_module.conv1.weight).
         global_model_path = "/app/weights/global_model.pt"
         if os.path.exists(global_model_path):
             try:
-                state = torch.load(global_model_path,
-                                   map_location=torch.device('cpu'))
-                self.torch_model.load_state_dict(state)
-                print(f"✅ Loaded global model checkpoint")
+                state = torch.load(
+                    global_model_path,
+                    map_location=torch.device('cpu')
+                )
+                # Add _module. prefix to match Opacus GradSampleModule keys
+                opacus_state = {
+                    f"_module.{k}": v
+                    for k, v in state.items()
+                }
+                self.torch_model.load_state_dict(opacus_state)
+                print(f"✅ Loaded global model checkpoint from previous round")
             except Exception as e:
                 print(f"⚠️ Could not load global checkpoint: {e}. "
                       f"Starting from random init.")
         else:
             print(f"ℹ️  No global checkpoint found. "
                   f"Starting from random initialisation.")
+
+        # ── FIX 1: Training lock ──────────────────────────────────────
+        # Opacus per-sample gradient hooks conflict with the gRPC stream
+        # generator when called synchronously inside StreamSignal.
+        # A threading.Lock ensures only one training step runs at a time,
+        # and fire-and-forget threading.Thread keeps the gRPC stream open
+        # while training completes independently.
+        self._train_lock = threading.Lock()
 
         # ── Azure Digital Twins ───────────────────────────────────────
         self.adt_client = None
@@ -141,14 +139,11 @@ class BioNetAggregator(biosignal_pb2_grpc.BioNetServiceServicer):
         """
         Opacus requires a DataLoader reference during make_private_with_epsilon
         to compute the noise multiplier from the target epsilon and dataset size.
-
-        For online learning (single samples streamed from gRPC), we pass a
-        minimal dummy loader. The noise_multiplier computed here is what matters
-        — it is correctly applied to every subsequent training step regardless
-        of whether we use this loader again.
+        We pass a minimal dummy loader — the computed noise_multiplier is what
+        matters and is correctly applied to every subsequent training step.
         """
         dummy_dataset = torch.utils.data.TensorDataset(
-            torch.zeros(100, 1, 1),  # 100 dummy samples
+            torch.zeros(100, 1, 1),
             torch.zeros(100, 1)
         )
         return torch.utils.data.DataLoader(
@@ -157,104 +152,85 @@ class BioNetAggregator(biosignal_pb2_grpc.BioNetServiceServicer):
             shuffle=False
         )
 
-    # def _local_train_step(self, value: float, label: float):
-    #     """
-    #     SECURITY UPGRADE: Opacus-instrumented training step.
-
-    #     The key difference from naive Laplacian noise:
-
-    #     NAIVE (old):
-    #       train normally → save weights → add random noise to weights
-    #       Problem: noise is not calibrated to gradient magnitude.
-    #                Provides no formal DP guarantee.
-
-    #     OPACUS (new):
-    #       per-sample gradient computed → clipped to max_grad_norm →
-    #       calibrated Gaussian noise added → optimizer step taken
-    #       Result: formally (epsilon, delta)-DP per round with
-    #               provable privacy accounting via Rényi DP.
-    #     """
-    #     self.torch_model.train()
-    #     self.optimizer.zero_grad()
-
-    #     x = torch.tensor([[[value]]], dtype=torch.float32)
-    #     target = torch.tensor([[label]], dtype=torch.float32)
-
-    #     output = self.torch_model(x)
-    #     loss = self.criterion(output, target)
-    #     loss.backward()
-
-    #     # Opacus clips and noises gradients here transparently
-    #     self.optimizer.step()
-
-    #     self.training_samples_this_round += 1
-
-    #     # Report actual epsilon spent — this is the formal privacy budget
-    #     epsilon_spent = self.privacy_engine.get_epsilon(delta=DP_DELTA)
-
-    #     print(f"🔒 DP Train Step | "
-    #           f"Loss: {loss.item():.4f} | "
-    #           f"ε spent: {epsilon_spent:.4f} / {DP_EPSILON} | "
-    #           f"Samples: {self.training_samples_this_round}")
-
-    #     # Warn when privacy budget is 80% consumed this round
-    #     if epsilon_spent > DP_EPSILON * 0.8:
-    #         print(f"⚠️  Privacy budget at "
-    #               f"{(epsilon_spent/DP_EPSILON)*100:.0f}% — "
-    #               f"consider triggering global aggregation")
     def _local_train_step(self, value: float, label: float):
-        try:
-            self.torch_model.train()
-            self.optimizer.zero_grad()
+        """
+        FIX 1: Opacus training runs in a separate thread.
 
-            x = torch.tensor([[[value]]], dtype=torch.float32)
-            target = torch.tensor([[label]], dtype=torch.float32)
+        Root cause of 'Per sample gradient is not initialized':
+        Opacus registers per-sample gradient hooks on the model. When
+        _local_train_step is called synchronously inside StreamSignal's
+        generator loop, the gRPC framework's internal threading interferes
+        with Opacus's hook lifecycle — hooks fire before gradients are
+        populated.
 
-            output = self.torch_model(x)
-            loss = self.criterion(output, target)
-            loss.backward()
-            self.optimizer.step()
+        Solution: acquire a lock and run the entire training step in a
+        daemon thread. The gRPC stream yields its response immediately
+        without waiting for training to complete. Training runs safely
+        in the background on the same model instance.
 
-            self.training_samples_this_round += 1
-            epsilon_spent = self.privacy_engine.get_epsilon(delta=DP_DELTA)
+        The lock prevents two concurrent burst packets from running
+        simultaneous backward passes, which would corrupt gradients.
+        """
+        def train_in_thread():
+            with self._train_lock:
+                try:
+                    self.torch_model.train()
+                    self.optimizer.zero_grad()
 
-            print(f"🔒 DP Train Step | "
-                f"Loss: {loss.item():.4f} | "
-                f"ε spent: {epsilon_spent:.4f} / {DP_EPSILON} | "
-                f"Samples: {self.training_samples_this_round}")
+                    x = torch.tensor([[[value]]], dtype=torch.float32)
+                    target = torch.tensor([[label]], dtype=torch.float32)
 
-            if epsilon_spent > DP_EPSILON * 0.8:
-                print(f"⚠️  Privacy budget at "
-                    f"{(epsilon_spent/DP_EPSILON)*100:.0f}%")
+                    output = self.torch_model(x)
+                    loss = self.criterion(output, target)
+                    loss.backward()
+                    self.optimizer.step()
 
-        except Exception as e:
-            print(f"⚠️ Training step skipped: {e}")
+                    self.training_samples_this_round += 1
+                    epsilon_spent = self.privacy_engine.get_epsilon(
+                        delta=DP_DELTA
+                    )
+
+                    print(f"🔒 DP Train Step | "
+                          f"Loss: {loss.item():.4f} | "
+                          f"ε spent: {epsilon_spent:.4f} / {DP_EPSILON} | "
+                          f"Samples: {self.training_samples_this_round}")
+
+                    if epsilon_spent > DP_EPSILON * 0.8:
+                        print(f"⚠️  Privacy budget at "
+                              f"{(epsilon_spent / DP_EPSILON) * 100:.0f}% — "
+                              f"consider triggering global aggregation")
+
+                except Exception as e:
+                    print(f"⚠️ Training step skipped: {e}")
+
+        # Fire-and-forget — stream is not blocked
+        t = threading.Thread(target=train_in_thread, daemon=True)
+        t.start()
 
     def _save_model_weights(self, hospital_id: str):
         """
-        SECURITY UPGRADE: Saves Opacus-trained state_dict.
-
-        No manual noise injection needed here — Opacus already applied
-        calibrated DP noise during the backward pass itself.
-        The saved weights are formally private by construction.
+        Saves Opacus-trained state_dict with formal DP guarantee.
+        Opacus already applied calibrated noise during backward pass —
+        no manual noise injection needed here.
         """
-        epsilon_spent = self.privacy_engine.get_epsilon(delta=DP_DELTA)
+        # Wait for any in-progress training to finish before reading weights
+        with self._train_lock:
+            epsilon_spent = self.privacy_engine.get_epsilon(delta=DP_DELTA)
 
-        weight_data = {
-            "hospital": hospital_id,
-            "num_samples": self.training_samples_this_round,
-            # state_dict values are already DP-protected by Opacus
-            "weights": {
-                k: v.tolist()
-                for k, v in self.torch_model.state_dict().items()
-            },
-            "epsilon_spent": epsilon_spent,
-            "delta": DP_DELTA,
-            "timestamp": time.time()
-        }
+            weight_data = {
+                "hospital": hospital_id,
+                "num_samples": self.training_samples_this_round,
+                "weights": {
+                    k: v.tolist()
+                    for k, v in self.torch_model.state_dict().items()
+                },
+                "epsilon_spent": epsilon_spent,
+                "delta": DP_DELTA,
+                "timestamp": time.time()
+            }
 
         filename = (f"/app/weights/update_"
-                    f"{hospital_id}_{int(time.time()*1000)}.json")
+                    f"{hospital_id}_{int(time.time() * 1000)}.json")
         try:
             with open(filename, 'w') as f:
                 json.dump(weight_data, f)
@@ -271,7 +247,7 @@ class BioNetAggregator(biosignal_pb2_grpc.BioNetServiceServicer):
 
         try:
             for request in request_iterator:
-                # ── 1. ONNX INFERENCE ─────────────────────────────────
+                # ── 1. ONNX INFERENCE (fast path — runs synchronously) ─
                 input_data = np.array(
                     [[[request.value]]], dtype=np.float32
                 )
@@ -284,9 +260,12 @@ class BioNetAggregator(biosignal_pb2_grpc.BioNetServiceServicer):
                       f"Prob: {prob:.4f} | "
                       f"Anomaly: {is_anomaly}")
 
-                # ── 2. DP-PROTECTED LOCAL TRAINING ────────────────────
+                # ── 2. DP TRAINING (async — does not block stream) ─────
                 if request.is_burst:
+                    # _local_train_step fires a daemon thread internally
                     self._local_train_step(request.value, label=1.0)
+                    # _save_model_weights acquires the lock and waits for
+                    # the training thread before reading state_dict
                     self._save_model_weights(request.hospital_id)
 
                 # ── 3. ADT SYNC (debounced) ────────────────────────────

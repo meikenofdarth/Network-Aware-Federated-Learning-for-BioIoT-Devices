@@ -12,7 +12,6 @@ spec:
   cooldownPeriod: 15
   triggers:
   - type: cpu
+    metricType: Utilization
     metadata:
-      # CNE Fix: Explicitly define the metric type
-      type: Utilization 
       value: "1"
